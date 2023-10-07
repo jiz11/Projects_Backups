@@ -6,6 +6,7 @@
 getwd()
 
 library(readr)
-typhoon <- read.csv("~/Typhoon_Data_Processing_R/RawData/1945-2022-1679448296692.csv", stringsAsFactors = TRUE)
+
+typhoon <- read_csv("RawData/1945-2022-1679448296692.csv")
 
 ```
