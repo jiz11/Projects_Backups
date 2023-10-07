@@ -1,0 +1,11 @@
+
+## prepare data
+
+```{r preparation, message=FALSE, warning=FALSE}
+
+getwd()
+
+library(readr)
+typhoon <- read.csv("~/Typhoon_Data_Processing_R/RawData/1945-2022-1679448296692.csv", stringsAsFactors = TRUE)
+
+```
