@@ -1,0 +1,37 @@
+---
+title: "TXTtoCSV"
+output: pdf_document
+date: "2023-10-12"
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(readr)
+getwd()
+
+```
+
+## R Markdown
+1. Rearrange the raw data.
+```{r batch processing}
+#Create a vector to list the name of files in RawData.
+precip_batch <- list.files( path = "./RawData/Test/", pattern = "*.txt", full.names = TRUE)
+
+#Add station information to data.
+station_info <- read_csv("RawData/Station_Info.csv")
+
+#Create a function to generate csv from txt.
+#Using loop may create redundant data.
+txt.to.csv.add.info <- function(input_txt){
+  #Read txt file and rename the txt file to csv file.
+  txt <- read.table(input_txt, sep = ",", header = TRUE)
+  csv.name <- sub(".txt", ".csv", basename(input_txt))
+  #Add station information to precipitation data.
+  csv <- txt %>% left_join(station_info, by = "StationId")
+  #Write the file.
+  write.csv(csv, file = paste0("./ProcessedData/", csv.name), row.names = FALSE)
+}
+
+lapply(precip_batch, txt.to.csv.add.info)
+
+```

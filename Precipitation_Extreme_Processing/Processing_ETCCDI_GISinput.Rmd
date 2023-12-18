@@ -1,0 +1,253 @@
+---
+title: "Processing"
+output: pdf_document
+date: "2023-10-25"
+---
+
+```{r set up remote server}
+library(ssh)
+
+#password: guestdku
+remote.session <- ssh_connect("guest1@10.200.13.84")
+print(remote.session)
+```
+
+## 1. Analysis environment constrcution
+This step aims to set up analysis environments, 
+including library necessary packages and check work dirctory.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(gstat) #for calculation
+library(lubridate) #treat date data.
+library(sp) # for spatial analysis
+#For ETCCDI indices calculation
+library(PCICt)
+library(climdex.pcic)
+
+getwd()
+
+```
+
+## 2. R reading and rearrangement
+This step aims to read the raw data and rearrange them.
+
+```{r reading and rearrangement, message=FALSE, warning=FALSE}
+#Define output directory
+output_drive <- "./Processed_Station_DailyData/"
+
+#Creat function to read file list and bind them
+read.list <- function(input_list){
+  read.table(input_list, header = TRUE, sep = ",")
+}
+
+baseline_list <- list.files( path = "./RawData/Exam_1961_2022/", 
+                             pattern = "*.txt", full.names = TRUE)
+baseline_groups <- lapply(baseline_list, read.list) %>% bind_rows()
+
+#Group the dataframe by year, month, day
+data_by_date <- baseline_groups %>% group_by(Year, Mon, Day) %>% nest()
+
+for (i in 1:nrow(data_by_date)) {
+  output_name <- file.path(
+    output_drive, 
+    paste(data_by_date$Year[i], 
+    #%02d means format the integer with 2 digits, left padding it with zeroes.
+    sprintf("%02d", data_by_date$Mon[i]),
+    sprintf("%02d", data_by_date$Day[i]),
+    ".csv", sep = "")
+    )
+  #[[ ]] means select element, which is different from [].
+  write.csv(data_by_date$data[[i]], output_name, row.names = FALSE)
+}
+cat("Loop completed.\n")
+
+rm(i)
+rm(output_name)
+rm(output_drive)
+
+```
+
+## cities points interpolation (IDW)
+
+```{r pressure, echo=FALSE, message=FALSE, warning=FALSE}
+#Read daily precipitation files.
+station_daily_batch <- list.files( path = "./Processed_Station_DailyData/", 
+                                   pattern = "*.csv", full.names = TRUE)
+
+#Generate idw function
+IDW.City.Daily <- function(input_Station_Daily, city_centroids){
+  precip_data <- read.csv(input_Station_Daily)
+
+  pre_2020_data <- subset(precip_data, 
+                          PRE_Time_2020 != 32766 & 
+                          PRE_Time_2020 != 999998 &
+                          PRE_Time_2020 != 999990 &
+                          PRE_Time_2020 != 999999)
+
+  if (!all(is.na(pre_2020_data$PRE_Time_2020))) {
+    coordinates(pre_2020_data) <- c("Lon", "Lat")
+    city_2020 <- idw(formula = PRE_Time_2020 ~ 1, 
+                     locations = pre_2020_data, 
+                     newdata = city_centroids)
+    city_centroids$Pre_2020_esti <- as.vector(city_2020$var1.pred)
+  } else {
+    city_2020 <- rep(NA, nrow(city_centroids))
+    city_centroids$Pre_2020_esti <- city_2020
+  }
+  
+  #Extract station file name as the date information for city centroids.
+  date <- tools::file_path_sans_ext(basename(input_Station_Daily))
+  city_centroids$date <- rep(date, nrow(city_centroids))
+  
+  #Output city precipitation indices files.
+  output_filename <- paste0("./Processed_City_DailyData/city_", date, ".csv")
+  write.csv(city_centroids, file = output_filename, row.names = FALSE)
+}
+
+#Read city centroids data as vector.
+city_centroids <- read_csv("RawData/city_centroid_table.csv")
+coordinates(city_centroids) <- c("longitude", "latitude")
+
+#Run the function for city cetroids.
+lapply(station_daily_batch, IDW.City.Daily, city_centroids = city_centroids)
+cat("City IDW processes complete.\n")
+
+```
+
+## Rearrange daily precipitation data to temporal data of specified city.
+The English names of some cities are overlapped, like Suzhou in Anhui and Suzhou in Jiangsu,
+therefore the city_code column is chosen to be reference for grouping.
+```{r rearrange city daily data}
+#According to definition of R95 in ETCCDI, the Pre_2020i is chosen as indices.
+create.city.temporal <- function(input_cities_daily, output_path){
+  #New method:
+  city_name_list <- input_cities_daily %>% group_by(city_code) %>%group_split()
+  
+  for (city_data in city_name_list) {
+    city_code <- unique(city_data$city_code)
+    write.csv(city_data, file.path(output_path, paste0(city_code, ".csv")),
+              row.names = FALSE)
+  }
+}
+
+city_temporal_drive <- "./Processed_City_TemporalData/"
+
+#Read cities daily precipitation data.
+city_daily_batch <- list.files(path = "./Processed_City_DailyData",
+                               pattern = "*.csv", full.names = TRUE)
+#Combine city daily files into one dataframe.
+city_combined <- lapply(city_daily_batch, read.csv) %>%
+                 bind_rows()
+                 #Filter the wet days to meet the
+                 #definition of R95 in ETCCDI.
+
+create.city.temporal(city_combined, city_temporal_drive)
+
+rm(city_combined)
+rm(city_temporal_drive)
+
+```
+
+## Transfer city temporal data to PCICt input txt format.
+
+```{r temporal to PCICt input}
+csv.to.pcict.txt <- function(input_csv){
+  temporal_data <- read.csv(input_csv)
+  city_code <- tools::file_path_sans_ext(basename(input_csv))
+  temporal_data$date <- as.Date(as.character(temporal_data$date), 
+                                format = "%Y%m%d")
+  output_txt <- temporal_data %>% 
+                #Add date columns.
+                mutate(year = year(date), 
+                       month = month(date),
+                       day = day(date)) %>% 
+                #Delete redundant columns.
+                subset(select = -c(OID_, prov_code, optional))
+  output_filename <- paste0("./Processed_City_PCICt_Input/", city_code, ".txt")
+  #Set "row.names = FALSE" or you will get an extra first column.
+  write.table(output_txt, output_filename, sep = ",", row.names = FALSE)
+}
+
+city_temporal_batch <- list.files( path = "./Processed_City_TemporalData/", 
+                                   pattern = "*.csv", full.names = TRUE)
+lapply(city_temporal_batch, csv.to.pcict.txt)
+
+cat("PCICt txt files generation complete.\n")
+```
+
+## Calculate ETCCDI indices through the climdax.pcic package.
+
+```{r ETCCDI indeces}
+etccdi.precipitation <- function(input_txt){
+  data_txt <- read.table(input_txt,header = TRUE, sep = ",")
+  city_code <- tools::file_path_sans_ext(basename(input_txt))
+  data_PCICt <- as.PCICt(do.call(paste, 
+                                 data_txt[,c("year", "month", "day")]), 
+                                 format="%Y%m%d", 
+                                 cal = "gregorian")
+  
+  ci <- climdexInput.raw(prec = data_txt$Pre_2020_esti,
+                         prec.dates = data_PCICt,
+                         base.range = c(1961,1990))
+  
+  #Exclude RX1day and RX5day, because their outputs are monthly data.
+  result_r95ptot <- climdex.r95ptot(ci)
+  result_r99ptot <- climdex.r99ptot(ci)
+  result_prcptot <- climdex.prcptot(ci)
+  result_r10mm <- climdex.r10mm(ci)
+  result_r20mm <- climdex.r20mm(ci)
+  result_sdii <- climdex.sdii(ci)
+  
+  result_df <- data.frame(
+    Year = names(result_r95ptot),
+    R95pTOT = result_r95ptot,
+    R99pTOT = result_r99ptot,
+    PRCPTOT = result_prcptot,
+    R10mm = result_r10mm,
+    R20mm = result_r20mm,
+    SDII = result_sdii
+  )
+  
+  result_df$city_name <- rep(data_txt[1,1], nrow(result_df))
+  result_df$city_code <- rep(data_txt[1,2], nrow(result_df))
+  result_df$prov_name <- rep(data_txt[1,3], nrow(result_df))
+  result_df$latitude <- rep(data_txt[1,4], nrow(result_df))
+  result_df$longitude <- rep(data_txt[1,5], nrow(result_df))
+  
+  output_filename <- paste0("./Output_ETCCDI_Precipitation/", city_code, ".csv")
+  write.csv(result_df,output_filename, row.names = FALSE)
+}
+
+city_PCICinput_batch <- list.files( path = "./Processed_City_PCICt_Input/", 
+                                    pattern = "*.txt", full.names = TRUE)
+lapply(city_PCICinput_batch, etccdi.precipitation)
+```
+
+## Rearrange output datasets for GIS mapping.
+
+```{r gis mapping data}
+#This function can perform well for both cities and counties data.
+etccdi.annual <- function(input_etccdi_combined, output_path){
+  etccdi_annual_list <- input_etccdi_combined %>% 
+                        group_by(Year) %>% 
+                        group_split()
+  
+  for (etccdi_annual in etccdi_annual_list) {
+    year <- unique(etccdi_annual$Year)
+    write.csv(etccdi_annual, file.path(output_path, 
+                                       paste0("CityLevel_", year, ".csv")),
+              row.names = FALSE)
+  }
+}
+
+#Convert city level output.
+output_drive <- "./Output_ETCCDI_MapInput/"
+city_etccdi_batch <- list.files(path = "./Output_ETCCDI_Precipitation/",
+                                pattern = ".csv", full.names = TRUE)
+city_etccdi_combined <- lapply(city_etccdi_batch, read.csv) %>% bind_rows()
+etccdi.annual(city_etccdi_combined, output_drive)
+
+```

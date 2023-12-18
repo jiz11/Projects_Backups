@@ -1,0 +1,61 @@
+---
+title: "Heatwave_Processing"
+output: pdf_document
+date: "2023-11-08"
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(tidyr)
+
+getwd()
+```
+
+## Create Consecutive columns.
+
+```{r cars}
+
+```
+
+## Calculate event frequency.
+
+```{r pressure, echo=FALSE}
+input_data <- read.csv("./HW events/95_5 hw events.csv")
+
+annual_list <- input_data %>% group_by(year) %>% group_split()
+
+for (data_one_year in annual_list) {
+  output_df <- data.frame(citycode = integer(),
+                          cityname = character(),
+                          year = integer(),
+                          EventCount = numeric(),
+                          stringsAsFactors = FALSE)
+  
+  year <- data_one_year[1,3]
+  cities_list <- data_one_year %>% group_by(citycode) %>% group_split()
+  
+  for (cities_record in cities_list) {
+    record <- data.frame(citycode = first(cities_record$citycode),
+                         cityname = first(cities_record$cityname),
+                         year = first(cities_record$year),
+                         EventCount = length(unique(cities_record$consecutive)),
+                         stringsAsFactors = FALSE)
+    
+    output_df <- bind_rows(output_df, record)
+  }
+  output_filename <- paste0("./HW events/95_5 hw events_MapInput/", year, ".txt")
+  write.csv(output_df, output_filename, row.names = FALSE)
+}
+
+rm(annual_list)
+rm(cities_list)
+rm(cities_record)
+rm(data_one_year)
+rm(input_data)
+rm(output_df)
+rm(record)
+rm(year)
+
+```
+
+

@@ -1,0 +1,289 @@
+---
+title: "Processing"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+date: "2023-10-25"
+---
+
+## 1. Analysis environment constrcution
+This step aims to set up analysis environments, 
+including library necessary packages and check work dirctory.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(gstat) #for calculation
+library(lubridate) #treat date data.
+library(purrr)
+library(sp) #For spatial processes.
+library(progress)# for progress bar.
+getwd()
+
+```
+
+## 2. R reading and rearrangement
+This step aims to read the raw data and rearrange them.
+
+```{r reading and rearrangement, message=FALSE, warning=FALSE}
+#Create a function to calculate monthly mean temperature,
+#here, the input of function should be a dataframe.
+filter.and.calculator <- function(df) {
+  StationId <- df$StationId[1]
+  Lat <- df$Lat[1]
+  Lon <- df$Lon[1]
+  Alti <- df$Alti[1]
+  year <- df$Year[1]
+  month <- df$Mon[1]
+  num_days <- nrow(df)
+  
+  leap_year <- c(1992, 1996, 2000, 2004)
+
+  if ((month == 1 & num_days > 29) |
+      (month == 2 & year %in% leap_year & num_days > 27) |
+      (month == 2 & year %in% !leap_year & num_days > 26) |
+      (month == 3 & num_days > 29) |
+      (month == 4 & num_days > 28) |
+      (month == 5 & num_days > 29) |
+      (month == 6 & num_days > 28) |
+      (month == 7 & num_days > 29) |
+      (month == 8 & num_days > 29) |
+      (month == 9 & num_days > 28) |
+      (month == 10 & num_days > 29) |
+      (month == 11 & num_days > 28) |
+      (month == 12 & num_days > 29)) {
+    TEM_Monthly_Avg <- mean(df$TEM_Avg, na.rm = TRUE)
+    output <- data.frame(
+      StationId = StationId,
+      Latitude = Lat,
+      Longitude = Lon,
+      Altitude = Alti,
+      Year = year,
+      Month = month,      
+      TEM_Monthly_Avg = TEM_Monthly_Avg
+    )
+    return(output)
+  }
+}
+
+#create a initial blank data frame.
+temp_result_df <- data.frame(StationId = integer(),
+                             Latitude = numeric(),
+                             Longitude = numeric(),
+                             Altitude = numeric(),
+                             Year = integer(),
+                             Month = integer(),      
+                             TEM_Monthly_Avg = numeric())
+
+#get file names in the folder as a vector.
+temp_file_list <- list.files( path = "./Temperature/RawData/", 
+                           pattern = "*.txt", full.names = TRUE)
+
+#Or we can use read.table to get a list (temp_list_groups).
+#read.list <- function(input_list){
+#  read.table(input_list, header = TRUE, sep = ",")
+#}
+#temp_list_groups <- lapply(temp_file_list, read.list)
+
+for (monthly_list in temp_file_list) {
+  #monthly_list is the pathway of a file,
+  #we need to use read.list() to get a dataframe,
+  #if we use temp_list_groups, we donnot need to read them again.
+  df_list <- read.list(monthly_list)
+  #We will get a list through below codes.
+  grouped_list <- df_list %>% group_by(StationId) %>% group_split()
+  for (input_list in grouped_list) {
+    #Convert the a tibble in the list as a dataframe.
+    temp_input_df <- as.data.frame(input_list)
+    temp_input_df <- subset(temp_input_df, TEM_Avg < 60)
+    temp_result_df <- bind_rows(temp_result_df, filter.and.calculator(temp_input_df))
+  }
+  # The second choice for reading a list:
+  #for (i in seq_along(grouped_list)) {
+  #  input_df <- grouped_list[[i]]
+  #  result_df <- bind_rows(result_df, filter_and_calculator(input_df))
+  #}
+}
+
+write.csv(temp_result_df, "./Temperature/Temp_Monthly_DailyMean.csv", row.names = FALSE)
+
+cat("Monthly Daily Mean Data Ready.\n")
+
+rm(temp_file_list)
+rm(monthly_list)
+rm(df_list)
+rm(grouped_list)
+rm(input_list)
+rm(temp_input_df)
+#rm(temp_result_df)
+```
+
+## Temperature Regression
+
+```{r rmd1, echo=FALSE, message=FALSE, warning=FALSE}
+T_Reg_Input <- read.csv("./Temperature/Temp_Mean_HeatIs.csv")
+
+T_Reg_model <- lm(TEM_Monthly_Avg ~ Latitude + Longitude + Altitude 
+                   + HeatIsland + HeatIsland:Altitude, data = T_Reg_Input)
+summary(T_Reg_model)
+
+rm(T_Reg_Input)
+rm(T_Reg_model)
+```
+
+## Add Altitude Info in Documentation to Dataset
+
+```{R rmd2}
+#Read station information csv.
+station_info <- read_csv("Temperature/Station_Info.csv")
+T_Reg_Input_NewAlti <- read.csv("./Temperature/Temp_Mean_HeatIs.csv")
+T_Reg_Input_NewAlti <- T_Reg_Input_NewAlti %>% 
+                        left_join(station_info, by = "StationId")
+
+T_Reg_model_NewAlti <- lm(TEM_Monthly_Avg ~ Latitude + Longitude + elev_site 
+              + HeatIsland + HeatIsland:elev_site, data = T_Reg_Input_NewAlti)
+summary(T_Reg_model_NewAlti)
+
+rm(station_info)
+rm(T_Reg_model_NewAlti)
+rm(T_Reg_Input_NewAlti)
+```
+
+## Add Altitude Info in SRTM DEM to Dataset
+
+```{R rmd3}
+#Read station information csv.
+station_info_DEM <- read.csv("./Temperature/Station_Info_DEM.csv")
+T_Reg_input_DEM <- read.csv("./Temperature/Temp_Mean_HeatIs.csv")
+T_Reg_input_DEM <- T_Reg_input_DEM %>% 
+                        left_join(station_info_DEM, by = "StationId")
+
+T_Reg_model_DEM <- lm(TEM_Monthly_Avg ~ Latitude + Longitude + DEM 
+                   + HeatIsland + HeatIsland:DEM, data = T_Reg_Input_DEM)
+summary(T_Reg_model_DEM)
+
+rm(station_info_DEM)
+rm(T_Reg_input_DEM)
+rm(T_Reg_model_DEM)
+```
+
+## Split Station Data Monthly
+
+```{r split station data}
+temp.station.monthly <- function(input_csv){
+  grouped_df <- input_csv %>% group_by(Year, Month) %>% group_split()
+  for (month in grouped_df) {
+    output_df <- data.frame(
+      StationId = month$StationId,
+      Latitude = month$Latitude,
+      Longitude = month$Longitude,
+      Altitude = month$Altitude,
+      Year = month$Year,
+      Month = month$Month,
+      TEM_Monthly_Avg = month$TEM_Monthly_Avg,
+      HeatIsland = month$HeatIsland,
+      DEM = month$DEM
+    )
+    year <- first(month$Year)
+    month <- first(month$Month)
+    write.csv(output_df, 
+              paste0("./Temperature/Input_Station_Monthly/Temp_Station_", year, "_", month, ".csv"),
+              row.names = FALSE)
+    cat("Station data for one month generated.\n")
+  }
+}
+
+station_info_DEM <- read.csv("./Temperature/Station_Info_DEM.csv")
+T_Reg_input_DEM <- read.csv("./Temperature/Temp_Mean_HeatIs.csv")
+temp_station_years <- T_Reg_input_DEM %>% 
+                        left_join(station_info_DEM, by = "StationId")
+
+temp.station.monthly(temp_station_years)
+
+rm(station_info_DEM)
+rm(T_Reg_input_DEM)
+rm(temp_station_years)
+```
+
+## Firm Annual Temperature through Gradient Plus Inverse Distance Squared Method
+
+```{r GIDS}
+GIDS.temperature <- function(input_station_list, input_firm){
+  #Input data.
+  firm_data <- input_firm
+  coordinates(firm_data) <- c("longitude", "latitude")
+  station_data <- read.csv(input_station_list)
+  station_data <- na.omit(station_data)
+  coordinates(station_data) <- c("Longitude", "Latitude")
+  
+  pb_group_by <- progress_bar$new(format = "[:bar] :percent ETA: :eta", total = 1)
+  #Calculate idw and gids.
+  firm_data$idw_temp <- as.vector(idw(formula = TEM_Monthly_Avg ~ 1, 
+                            locations = station_data, 
+                            newdata = firm_data,
+                            maxdist = 200)$var1.pred)
+  firm_data$idw_dem <- as.vector(idw(formula = DEM ~ 1, 
+                           locations = station_data, 
+                           newdata = firm_data,
+                           maxdist = 200)$var1.pred)
+  firm_data$idw_HI <- as.vector(idw(formula = HeatIsland ~ 1, 
+                          locations = station_data, 
+                          newdata = firm_data,
+                          maxdist = 200)$var1.pred)
+  firm_data$TEM_Daily_Mean = firm_data$idw_temp + 
+    (firm_data$HeatIsland - firm_data$idw_HI)*(0.023) + 
+    (firm_data$DEM - firm_data$idw_dem)*(-0.004)
+  
+  #Extract station date information for firms.
+  firm_data$Year <- rep(station_data$Year[1], nrow(firm_data))
+  firm_data$Month <- rep(station_data$Month[1], nrow(firm_data))
+  
+  output_df <- as.data.frame(
+                subset(firm_data, select = c(company, id, Year, Month, TEM_Daily_Mean)))
+  output_year <- bind_rows(output_year, output_df)
+  
+  return(output_year)
+  cat("GIDS for one month complete.\n")
+}
+
+####Input variables artificially!!!!!!#########
+
+#Create empty df!!!!
+output_year <- data.frame()
+#Change No.year of firm!!!!!!
+GIDS_firm <- read.csv("./Temperature/Input_Firms/Firms_TempInput_2000.csv")
+#Change station list in different years!!!!
+temp_station_list <- list.files( path = "./Temperature/Input_Station_Monthly/", 
+                                     pattern = "*.csv", full.names = TRUE)
+
+output_year <- lapply(temp_station_list, GIDS.temperature, input_firm = GIDS_firm)
+#The output of lapply is a list, use do.call and rbind to create df.
+output_year <- do.call(rbind, output_year)
+
+################################################
+
+Temp.Annual.Mean <- function(input_df){
+  write_year <- input_df$Year[1]
+
+  output_df <- input_df %>%
+    group_by(id) %>%
+    summarize(
+      id = first(id),
+      company = first(company),
+      year = first(Year),
+      Temp_Monthly_Avg = mean(TEM_Daily_Mean, na.rm = TRUE)
+    )
+  write.csv(output_df, 
+            paste0("./Temperature/Output/Firm_Temperature_", write_year, ".csv"),
+            row.names = FALSE)
+  cat("Processes for one year complete.\n")
+}
+Temp.Annual.Mean(output_year)
+
+rm(output_year)
+rm(GIDS_firm)
+rm(temp_station_list)
+
+```

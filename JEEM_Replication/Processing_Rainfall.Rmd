@@ -1,0 +1,221 @@
+---
+title: "Processing_Rainfall"
+output: html_document
+date: "2023-12-11"
+---
+
+## 1. Analysis environment constrcution
+This step aims to set up analysis environments, 
+including library necessary packages and check work dirctory.
+```{r setup, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(readr)
+library(gstat) #for calculation
+library(lubridate) #treat date data.
+library(purrr)
+library(sp) #For spatial processes.
+library(progress)# for progress bar.
+getwd()
+```
+
+## 2. Read Station Data and Calculate their Monthly Mean
+
+```{r read stations}
+#Create a function to calculate monthly mean rainfall,
+#here, the input of function should be a dataframe.
+rainfall.calculator <- function(df) {
+  StationId <- df$StationId[1]
+  Lat <- df$Lat[1]
+  Lon <- df$Lon[1]
+  year <- df$Year[1]
+  month <- df$Mon[1]
+
+  PRE_Monthly_Avg <- mean(df$PRE_Time_2020, na.rm = TRUE)
+  output <- data.frame(StationId = StationId,
+                       Latitude = Lat,
+                       Longitude = Lon,
+                       Year = year,
+                       Month = month,      
+                       PRE_Monthly_Avg = PRE_Monthly_Avg)
+  return(output)
+}
+
+read.list <- function(input_list){
+  read.table(input_list, header = TRUE, sep = ",")
+}
+
+####run the code a second time starts below.####
+
+#Create initial blank data frame.
+pre_result_df <- data.frame(StationId = integer(),
+                            Latitude = numeric(),
+                            Longitude = numeric(),
+                            Year = integer(),
+                            Month = integer(),      
+                            PRE_Monthly_Avg = numeric())
+
+#Read rainfall data in the folder.
+pre_file_list <- list.files( path = "./Rainfall/RawData/", 
+                           pattern = "*.txt", full.names = TRUE)
+pre_list_groups <- lapply(pre_file_list, read.list)
+
+for (monthly_list in pre_list_groups) {
+  #We will get a list through below codes.
+  grouped_list <- monthly_list %>% group_by(StationId) %>% group_split()
+  for (i in seq_along(grouped_list)) {
+    pre_input_df <- grouped_list[[i]]
+    pre_input_df <- subset(pre_input_df, PRE_Time_2020 < 5000)
+    pre_result_df <- bind_rows(pre_result_df, rainfall.calculator(pre_input_df))
+  }
+}
+
+write.csv(pre_result_df, "./Rainfall/Pre_Monthly_DailyMean.csv", row.names = FALSE)
+
+cat("Monthly Daily Mean Pre Data Ready.\n")
+
+rm(pre_file_list)
+rm(pre_list_groups)
+rm(monthly_list)
+rm(grouped_list)
+rm(i)
+rm(pre_input_df)
+#rm(pre_result_df)
+```
+
+## 3. Spatial Interpolation for Firms
+
+```{r IDW}
+#Generate idw function
+IDW.Firm.Monthly <- function(Station_Monthly, firm_locations){
+    coordinates(Station_Monthly) <- c("Longitude", "Latitude")
+    firms_monthly <- idw(formula = PRE_Monthly_Avg ~ 1, 
+                         locations = Station_Monthly, 
+                         newdata = firm_locations)
+    firm_locations$Pre_Monthly_Esti <- as.vector(firms_monthly$var1.pred)
+  
+  #Extract station date information for firms.
+  firm_locations$Year <- rep(Station_Monthly$Year[1], nrow(firm_locations))
+  firm_locations$Month <- rep(Station_Monthly$Month[1], nrow(firm_locations))
+  
+  output <- as.data.frame(firm_locations) #The output of idw() is vector
+    return(output)
+}
+
+#Read firm locations data as vector.
+firm_locations <- read.csv("./Rainfall/firms_geo.csv")
+coordinates(firm_locations) <- c("longitude", "latitude")
+
+#Read Station Data.
+pre_IDW_Station <- read.csv("./Rainfall/Pre_Monthly_DailyMean.csv")
+
+grouped_IDW_Station_Year <- pre_IDW_Station %>% group_by(Year) %>% group_split()
+for (i in seq_along(grouped_IDW_Station_Year)) {
+  pre_IDW_Year <- grouped_IDW_Station_Year[[i]]
+  name_year <- pre_IDW_Year$Year[1]
+  pre_IDW_Month_Output <- data.frame()
+  grouped_IDW_Station_Month <- pre_IDW_Year %>% group_by(Month) %>% group_split()
+  for (n in seq_along(grouped_IDW_Station_Month)) {
+    pre_IDW_Month <- grouped_IDW_Station_Month[[n]]
+    pre_IDW_Month_Output <- bind_rows(pre_IDW_Month_Output, 
+                                      IDW.Firm.Monthly(pre_IDW_Month, firm_locations))
+  }
+  write.csv(pre_IDW_Month_Output, 
+            paste0("./Rainfall/Pre_Firms_Monthly_inYears/Pre_Firms_Monthy_", name_year, ".csv"), 
+            row.names = FALSE)
+}
+
+cat("Firms IDW processes complete.\n")
+
+rm(firm_locations)
+rm(pre_IDW_Station)
+rm(grouped_IDW_Station_Year)
+rm(i)
+rm(pre_IDW_Year)
+rm(name_year)
+rm(pre_IDW_Month_Output)
+rm(grouped_IDW_Station_Month)
+rm(n)
+rm(pre_IDW_Month)
+rm(pre_IDW_Month_Output)
+#rm(IDW.Firm.Monthly)
+```
+
+## 4. Get Annual Daily Mean for Firms
+
+```{r annual daily mean}
+#Read rainfall data in the folder.
+pre_firm_monthly_list <- list.files( path = "./Rainfall/Pre_Firms_Monthly_inYears/", 
+                                     pattern = "*.csv", full.names = TRUE)
+
+#Create function to calculate annual mean for each firm.
+Rainfall.Annual.Mean <- function(file_list){
+  input_csv <- read.csv(file_list)
+  output_year <- input_csv$Year[1]
+  output_df <- data.frame()
+  
+  #Supervise group_by processes.
+  pb_group_by <- progress_bar$new(format = "[:bar] :percent ETA: :eta", total = 1)
+  grouped_Firm_Monthly <- input_csv %>% group_by(id) %>% group_split()
+  
+  #Supervise loop processes.
+  pb_loop <- progress_bar$new(format = "[:bar] :percent ETA: :eta", 
+                              total = length(grouped_Firm_Monthly))
+  for (m in seq_along(grouped_Firm_Monthly)) {
+    pb_loop$tick()
+    pre_firm_year <- grouped_Firm_Monthly[[m]]
+    PRE_Monthly_Avg <- mean(pre_firm_year$Pre_Monthly_Esti, na.rm = TRUE)
+    mean_df <- data.frame(province = pre_firm_year$province[1],
+                          city = pre_firm_year$city[1],
+                          county = pre_firm_year$county[1],
+                          company = pre_firm_year$company[1],
+                          id = pre_firm_year$id[1],
+                          longitude = pre_firm_year$longitude[1],
+                          latitude = pre_firm_year$latitude[1],
+                          year = pre_firm_year$Year[1],
+                          PRE_Monthly_Avg = PRE_Monthly_Avg)
+    output_df <- bind_rows(output_df, mean_df)
+  }
+  write.csv(output_df, 
+            paste0("./Rainfall/Output/Firm_Rainfall_", output_year, ".csv"),
+            row.names = FALSE)
+  cat("Processes for one year complete.\n")
+}
+
+lapply(pre_firm_monthly_list, Rainfall.Annual.Mean)
+
+# Modified function to promote computation.
+##Why efficiency of the original function is very low?##
+#the problems exist in original function are for loop and bind_rows(),
+#for loop, each iteration in for loop need reallocate memory and maintain loop state,
+#for bind_rows, each time when a new row is added, the memory reallocation is required.
+##why modified function is higher?##
+#The modified code uses vectorized operations from the dplyr library, 
+#including the group_by and summarize functions,
+#functions in dplyr internally operate on entire vectors or groups,
+#instead of processing them one by one,
+#summarize function processes each group simultaneously, 
+#avoiding explicit iteration and row-wise data frame operations.
+Rainfall.Annual.Mean2 <- function(file_list){
+  input_csv <- read.csv(file_list)
+  output_year <- input_csv$Year[1]
+  
+  #Supervise group_by processes.
+  pb_group_by <- progress_bar$new(format = "[:bar] :percent ETA: :eta", total = 1)
+  output_df <- input_csv %>%
+    group_by(id) %>%
+    summarize(
+      city = first(city),
+      county = first(county),
+      company = first(company),
+      year = first(Year),
+      PRE_Monthly_Avg = mean(Pre_Monthly_Esti, na.rm = TRUE)
+    )
+  write.csv(output_df, 
+            paste0("./Rainfall/Output/Firm_Rainfall_", output_year, ".csv"),
+            row.names = FALSE)
+  cat("Processes for one year complete.\n")
+}
+
+lapply(pre_firm_monthly_list, Rainfall.Annual.Mean2)
+```
